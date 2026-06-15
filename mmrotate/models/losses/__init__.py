@@ -10,10 +10,11 @@ from .spatial_border_loss import SpatialBorderLoss
 from .poly_iou_loss import PolyIoULoss, PolyGIoULoss
 from .softmax_focal_loss import SoftmaxFocalLoss
 from .adaptive_recognition_loss import AdaptiveRecognitionLoss
+from .bidirectional_contrastive_loss import BidirectionalContrastiveLoss
 
 __all__ = [
     'GDLoss', 'GDLoss_v1', 'KFLoss', 'ConvexGIoULoss', 'BCConvexGIoULoss',
     'KLDRepPointsLoss', 'SmoothFocalLoss', 'RotatedIoULoss',
     'SpatialBorderLoss', 'PolyIoULoss', 'PolyGIoULoss', 'AdaptiveRecognitionLoss',
-    'SoftmaxFocalLoss'
+    'SoftmaxFocalLoss', 'BidirectionalContrastiveLoss'
 ]

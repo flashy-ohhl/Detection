@@ -1,10 +1,16 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
 import platform
+from functools import partial
 
+from mmcv.parallel import collate
+from mmcv.runner import get_dist_info
 from mmcv.utils import build_from_cfg
 from mmdet.datasets import DATASETS, PIPELINES
-from mmdet.datasets.builder import _concat_dataset
+from mmdet.datasets.builder import _concat_dataset, worker_init_fn
+from torch.utils.data import DataLoader
+
+from .samplers import StructuredBatchSampler
 
 ROTATED_DATASETS = DATASETS
 ROTATED_PIPELINES = PIPELINES
@@ -47,3 +53,59 @@ def build_dataset(cfg, default_args=None):
         dataset = build_from_cfg(cfg, ROTATED_DATASETS, default_args)
 
     return dataset
+
+
+def build_structured_dataloader(dataset,
+                                sampler_cfg,
+                                workers_per_gpu,
+                                dist=False,
+                                seed=None,
+                                pin_memory=False,
+                                persistent_workers=False,
+                                **kwargs):
+    """Build a DataLoader that yields complete B x K batches.
+
+    Uses :class:`StructuredBatchSampler` as the ``batch_sampler`` so each batch
+    contains ``B`` base images x ``K`` augmentation slots. The dataset must
+    expose ``num_base`` (e.g. :class:`StructuredFAIR1MDataset`).
+
+    Args:
+        dataset (Dataset): a B x K structured dataset (has ``num_base``).
+        sampler_cfg (dict): ``num_aug`` (K), ``batch_base`` (B), and optional
+            ``shuffle`` / ``drop_last``.
+        workers_per_gpu (int): dataloader workers per process.
+        dist (bool): distributed training; shards base images across ranks.
+        seed (int, optional): random seed.
+    """
+    rank, world_size = get_dist_info()
+    num_replicas = world_size if dist else 1
+    rk = rank if dist else 0
+
+    num_aug = sampler_cfg['num_aug']
+    batch_base = sampler_cfg['batch_base']
+
+    batch_sampler = StructuredBatchSampler(
+        num_base=dataset.num_base,
+        num_aug=num_aug,
+        batch_base=batch_base,
+        shuffle=sampler_cfg.get('shuffle', True),
+        drop_last=sampler_cfg.get('drop_last', True),
+        seed=seed if seed is not None else 0,
+        num_replicas=num_replicas,
+        rank=rk)
+
+    samples_per_gpu = batch_base * num_aug
+    init_fn = partial(
+        worker_init_fn, num_workers=workers_per_gpu, rank=rank,
+        seed=seed) if seed is not None else None
+
+    data_loader = DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=workers_per_gpu,
+        collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+        pin_memory=pin_memory,
+        worker_init_fn=init_fn,
+        persistent_workers=persistent_workers,
+        **kwargs)
+    return data_loader

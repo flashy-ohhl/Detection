@@ -10,6 +10,7 @@ from mmdet.core import DistEvalHook, EvalHook
 from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 
+from mmrotate.datasets.builder import build_structured_dataloader
 from mmrotate.utils import compat_cfg, find_latest_checkpoint, get_root_logger
 
 
@@ -45,7 +46,23 @@ def train_detector(model,
         **cfg.data.get('train_dataloader', {})
     }
 
-    data_loaders = [build_dataloader(ds, **train_loader_cfg) for ds in dataset]
+    # Structured B x K dataloader (for the disentangle / contrastive MVE).
+    structured_cfg = cfg.data.get('structured_sampler', None)
+    if structured_cfg is not None:
+        data_loaders = [
+            build_structured_dataloader(
+                ds,
+                structured_cfg,
+                workers_per_gpu=train_loader_cfg['workers_per_gpu'],
+                dist=distributed,
+                seed=cfg.seed,
+                persistent_workers=train_loader_cfg.get(
+                    'persistent_workers', False)) for ds in dataset
+        ]
+    else:
+        data_loaders = [
+            build_dataloader(ds, **train_loader_cfg) for ds in dataset
+        ]
 
     # put model on gpus
     if distributed:
