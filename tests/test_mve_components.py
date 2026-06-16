@@ -33,10 +33,14 @@ _loss = _load('mmrotate/models/losses/bidirectional_contrastive_loss.py',
               'bidirectional_contrastive_loss')
 _dis = _load('mmrotate/models/roi_heads/disentangle_head.py',
              'disentangle_head')
+_grl = _load('mmrotate/models/roi_heads/grl.py', 'grl')
 
 StructuredBatchSampler = _sampler.StructuredBatchSampler
 BidirectionalContrastiveLoss = _loss.BidirectionalContrastiveLoss
+supervised_contrastive = _loss.supervised_contrastive
 DisentangleHead = _dis.DisentangleHead
+grad_reverse = _grl.grad_reverse
+dann_alpha = _grl.dann_alpha
 
 
 # --------------------------------------------------------------------------- #
@@ -89,20 +93,28 @@ def _ids_for(B, K):
     return orig, aug
 
 
-def test_mask_construction():
-    orig, aug = _ids_for(2, 3)  # 6 samples
-    dp, dn, npos, nn_ = BidirectionalContrastiveLoss._build_masks(orig, aug)
-    # no self-positives / self-negatives
-    assert not torch.diag(dp).any()
-    assert not torch.diag(dn).any()
-    assert not torch.diag(npos).any()
-    assert not torch.diag(nn_).any()
-    # disc positives: same image, different aug -> K-1 per row
-    assert dp.sum(1).unique().tolist() == [2]
-    # disc negatives: different image -> (B-1)*K per row
-    assert dn.sum(1).unique().tolist() == [3]
-    # nuis positives: same aug, different image -> B-1 per row
-    assert npos.sum(1).unique().tolist() == [1]
+def test_supcon_same_label_low():
+    """Identical embeddings for same label, orthogonal across labels -> low."""
+    d = 8
+    labels = torch.tensor([0, 0, 1, 1, 2, 2])
+    base = torch.eye(3, d)
+    feats = torch.nn.functional.normalize(
+        torch.stack([base[l] for l in labels]), dim=1)
+    good = supervised_contrastive(feats, labels, 0.07)
+
+    torch.manual_seed(0)
+    rand = torch.nn.functional.normalize(torch.randn(6, d), dim=1)
+    bad = supervised_contrastive(rand, labels, 0.07)
+    assert good < bad
+    assert torch.isfinite(good) and good >= 0
+
+
+def test_supcon_single_label_is_zero():
+    """No negatives (one label) -> no valid anchors -> zero loss."""
+    feats = torch.nn.functional.normalize(torch.randn(5, 8), dim=1)
+    labels = torch.zeros(5, dtype=torch.long)
+    out = supervised_contrastive(feats, labels, 0.07)
+    assert float(out) == 0.0
 
 
 def test_loss_positive_and_finite():
@@ -144,6 +156,32 @@ def test_loss_backward():
     crit = BidirectionalContrastiveLoss()
     out = crit(feats, feats, orig, aug)
     (out['loss_disc_bicon'] + out['loss_nuis_bicon']).backward()
+
+
+# --------------------------------------------------------------------------- #
+# Gradient Reversal Layer
+# --------------------------------------------------------------------------- #
+def test_grl_reverses_gradient():
+    x = torch.randn(4, 3, requires_grad=True)
+    w = torch.randn(3, 2)
+    # plain forward gradient
+    (x @ w).sum().backward()
+    g_plain = x.grad.clone()
+    x.grad = None
+    # gradient through GRL with alpha=1 should be exactly negated
+    (grad_reverse(x, 1.0) @ w).sum().backward()
+    assert torch.allclose(x.grad, -g_plain, atol=1e-6)
+
+
+def test_grl_forward_is_identity():
+    x = torch.randn(5, 4)
+    assert torch.allclose(grad_reverse(x, 0.7), x)
+
+
+def test_dann_alpha_schedule():
+    assert abs(dann_alpha(0, 2000, 1.0)) < 1e-6        # starts at 0
+    assert dann_alpha(2000, 2000, 1.0) > 0.9           # saturates near alpha_max
+    assert dann_alpha(100, 0, 1.0) == 1.0              # no warmup -> constant
 
 
 # --------------------------------------------------------------------------- #

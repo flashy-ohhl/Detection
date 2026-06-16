@@ -31,12 +31,26 @@ StructuredBatchSampler ── idx = base*K + aug ──> StructuredFAIR1MDataset
         │
 backbone → FPN → BCFN → RPN → ROIAlign → shared_2fc (F_feat, 1024)
         ├─ MLP_disc → F_disc(128) ─┬─ Linear(128→1024) → ARL fc_cls
-        │                          └─ image-level mean-pool(pos) → L_disc_bicon
-        ├─ MLP_nuis → F_nuis(128) ──── image-level mean-pool(pos) → L_nuis_bicon
+        │                          ├─ SupCon by object_id → L_disc_bicon
+        │                          └─ GRL → predict aug_id  → L_adv_disc
+        ├─ MLP_nuis → F_nuis(128) ─┬─ SupCon by aug_id     → L_nuis_bicon
+        │                          └─ GRL → predict class   → L_adv_nuis
         └─ F_feat(1024) ───────────────────────────────────────→ fc_reg
 ```
 
-`L_total = L_rpn + L_cls(ARL via F_disc) + L_bbox_reg + 0.5·L_disc + 0.5·L_nuis`
+`L_total = L_rpn + L_cls(ARL via F_disc) + L_bbox_reg`
+`        + 0.5·L_disc_bicon + 0.5·L_nuis_bicon + 0.1·L_adv_disc + 0.1·L_adv_nuis`
+
+**Contrast level** (`roi_head.contrast_level`): `proposal` (default) makes every
+positive proposal a contrastive sample — F_disc grouped by `object_id =
+(original_id, matched_gt_index)` (same object across corruptions = positive),
+F_nuis grouped by `aug_id`. This yields hundreds of samples per step even at
+B=2 (image-level pooling gave only B*K=6). `image` keeps the original pooling.
+
+**GRL disentanglement** (`roi_head.disentangle_adv`): two gradient-reversal
+adversaries strip cross-factor leakage — aug_id is made unpredictable from
+F_disc, class unpredictable from F_nuis. Their accuracy is a live disentangle
+diagnostic (logged as `loss_adv_disc` / `loss_adv_nuis`).
 
 ## Run (single GPU, remote server)
 
@@ -75,8 +89,9 @@ annotations are shared (corruption does not move boxes).
 4. **Losses appear**: `loss_disc_bicon` / `loss_nuis_bicon` should show up in
    the log and be finite/decreasing.
 
-## Tested locally (CPU, `tests/test_mve_components.py`, 8/8 pass)
+## Tested locally (CPU, `tests/test_mve_components.py`, 12/12 pass)
 
 B x K matrix completeness, distributed partition, per-epoch reshuffle,
-contrastive mask construction, InfoNCE positivity / discriminativeness /
-backward, DisentangleHead shapes + L2 norm, builtin fog/noise at 1024x1024.
+supervised-contrastive (same-label / single-label), InfoNCE positivity /
+discriminativeness / backward, GRL gradient reversal + DANN schedule,
+DisentangleHead shapes + L2 norm, builtin fog/noise at 1024x1024.
