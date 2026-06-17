@@ -70,9 +70,11 @@ def collect_features(model, loader, num_batches, max_samples, device):
         gt_labels = [l.to(device) for l in _unwrap(data['gt_labels'])]
 
         x = model.extract_feat(img)
+        # RPN runs on the pre-fusion FPN features; BCFN fusion is applied
+        # afterwards, only for the RoI head (matches PETDet.simple_test).
+        proposal_list = model.rpn_head.simple_test_rpn(x, img_metas)
         if model.with_fusion:
             x = model.fusion(x)
-        proposal_list = model.rpn_head.simple_test_rpn(x, img_metas)
 
         sampling_results = []
         for i in range(len(img_metas)):
