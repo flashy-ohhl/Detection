@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Optimizer hook that skips an iteration when the loss/grad is non-finite.
+"""Optimizer hook that skips an iteration when the loss is non-finite.
 
 grad_clip only bounds *large finite* gradients; it cannot protect against a
 NaN/Inf produced in the forward pass (e.g. rotated-IoU losses on a degenerate
@@ -7,23 +7,32 @@ box, which can occur sporadically -- especially with corruption augmentation).
 Without a guard, one such batch backpropagates NaN into the weights and the
 whole run is lost.
 
-This hook checks the loss before backward and (optionally) the grads after; if
-either is non-finite it zeroes the grads and skips ``optimizer.step()`` for that
-iteration, so a single bad batch no longer kills training.
+DDP safety: ``loss.backward()`` triggers a cross-rank gradient all-reduce, so if
+only *some* ranks skip backward the others deadlock. This hook all-reduces a
+"finite" flag first, so every rank agrees to skip (or not) together.
 """
 import torch
+import torch.distributed as dist
 from mmcv.runner import HOOKS, OptimizerHook
+
+
+def _all_ranks_finite(value_is_finite, device):
+    """True only if the value is finite on every rank (collective)."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return value_is_finite
+    flag = torch.tensor([1.0 if value_is_finite else 0.0], device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)  # min -> 0 if any rank is 0
+    return flag.item() > 0.5
 
 
 @HOOKS.register_module()
 class NaNSafeOptimizerHook(OptimizerHook):
-    """OptimizerHook that skips non-finite iterations.
+    """OptimizerHook that skips non-finite iterations (DDP-safe).
 
     Args:
         grad_clip (dict, optional): same as ``OptimizerHook``.
         check_grad (bool): also verify gradients are finite after backward.
-            Default: False (checking the scalar loss is usually enough and
-            cheaper).
+            Default: False (the scalar-loss check is usually enough & cheaper).
     """
 
     def __init__(self, grad_clip=None, check_grad=False):
@@ -35,11 +44,13 @@ class NaNSafeOptimizerHook(OptimizerHook):
         runner.optimizer.zero_grad()
         loss = runner.outputs['loss']
 
-        if not torch.isfinite(loss):
+        finite = _all_ranks_finite(bool(torch.isfinite(loss).item()),
+                                   loss.device)
+        if not finite:
             self._skipped += 1
             runner.logger.warning(
-                f'NaNSafeOptimizerHook: non-finite loss ({loss.item()}), '
-                f'skipping iter (total skipped: {self._skipped}).')
+                'NaNSafeOptimizerHook: non-finite loss on some rank, skipping '
+                f'iter (total skipped: {self._skipped}).')
             runner.optimizer.zero_grad()
             return
 
@@ -52,14 +63,14 @@ class NaNSafeOptimizerHook(OptimizerHook):
                                          runner.outputs['num_samples'])
 
         if self.check_grad:
-            finite = all(
+            local_finite = all(
                 p.grad is None or torch.isfinite(p.grad).all()
                 for p in runner.model.parameters())
-            if not finite:
+            if not _all_ranks_finite(local_finite, loss.device):
                 self._skipped += 1
                 runner.logger.warning(
-                    'NaNSafeOptimizerHook: non-finite grad, skipping iter '
-                    f'(total skipped: {self._skipped}).')
+                    'NaNSafeOptimizerHook: non-finite grad on some rank, '
+                    f'skipping step (total skipped: {self._skipped}).')
                 runner.optimizer.zero_grad()
                 return
 
