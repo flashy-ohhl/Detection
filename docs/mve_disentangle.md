@@ -76,6 +76,28 @@ python tools/eval_corruption.py \
 Each variant folder holds the corrupted images (`<root>/<variant>/images/`);
 annotations are shared (corruption does not move boxes).
 
+## Disentanglement diagnostic (decisive check)
+
+The in-training `loss_adv_*` is a min-max equilibrium and cannot distinguish
+"F_disc is corruption-free" from "the adversary collapsed". To settle it, freeze
+the trained model and run linear probes on the frozen embeddings:
+
+```bash
+python tools/diagnose_disentangle.py \
+    configs/petdet/mve/petdet_mve_b2k3_fair1m_le90.py \
+    work_dirs/petdet_mve_b2k3_fair1m_le90/epoch_20.pth --num-batches 150
+```
+
+Prints a 2x2 probe-accuracy matrix. Want the diagonal HIGH, off-diagonal low:
+
+|            | -> CLASS        | -> AUG          |
+|------------|-----------------|-----------------|
+| from F_disc| high (content)  | ~chance (clean) |
+| from F_nuis| ~majority (clean)| high (corruption)|
+
+`disc->aug` near 1/K and `nuis->class` near the majority-class rate == genuine
+disentanglement. High off-diagonal == leakage (collapsed adversary).
+
 ## Verify on the server (could not be tested locally — no mmdet here)
 
 1. **Config builds**: `python tools/train.py <cfg> --cfg-options runner.max_epochs=1`
