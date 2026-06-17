@@ -47,6 +47,13 @@ train_pipeline = [
 
 data = dict(train=dict(pipeline=train_pipeline))
 
+# Corruption augmentation occasionally triggers a NaN in the rotated-IoU loss
+# (degenerate box). grad_clip can't catch a forward-pass NaN, so skip the bad
+# iteration instead of letting it corrupt the weights.
+optimizer_config = dict(
+    type='NaNSafeOptimizerHook',
+    grad_clip=dict(max_norm=35, norm_type=2))
+
 # 12 epochs + step [8,11] are inherited from the PETDet base config
 # (schedule_1x + qopn lr_config). Stated here only for clarity:
 # runner = dict(type='EpochBasedRunner', max_epochs=12)
