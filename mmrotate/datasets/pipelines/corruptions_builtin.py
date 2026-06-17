@@ -133,6 +133,26 @@ def gaussian_blur(x, severity=1):
     return (x * 255).astype(np.uint8)
 
 
+def spatter(x, severity=1):
+    """Simplified, size-safe mud-spatter occlusion (non-physical corruption).
+
+    Not a pixel-exact match to Hendrycks' spatter (which needs skimage +
+    Canny + distanceTransform); this captures the essence -- random blurred
+    liquid blobs occluding/tinting the image -- and works at any size. Used
+    consistently for both training aug and evaluation.
+    """
+    import cv2
+    thr = [0.58, 0.62, 0.66, 0.70, 0.74][severity - 1]
+    x = x.astype(np.float32) / 255.
+    h, w = x.shape[:2]
+    liquid = np.random.normal(size=(h, w), loc=0.5, scale=0.3)
+    liquid = cv2.GaussianBlur(liquid, (0, 0), sigmaX=3)
+    mask = (liquid > thr).astype(np.float32)[..., None]
+    mud = np.array([0.20, 0.30, 0.45], dtype=np.float32)  # dark brown blob
+    out = x * (1 - mask) + mud * mask
+    return (np.clip(out, 0, 1) * 255).astype(np.uint8)
+
+
 CORRUPTIONS = {
     'gaussian_noise': gaussian_noise,
     'fog': fog,
@@ -140,4 +160,5 @@ CORRUPTIONS = {
     'contrast': contrast,
     'defocus_blur': defocus_blur,
     'gaussian_blur': gaussian_blur,
+    'spatter': spatter,
 }

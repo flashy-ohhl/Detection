@@ -1,26 +1,22 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Multi-corruption augmentation transform (module 2 of the MVE plan).
+"""Corruption augmentation transforms.
 
-Turns a clean image into one of ``K`` degraded versions, selected by the
-``aug_id`` field injected by :class:`StructuredFAIR1MDataset`.  The degradation
-is applied in-place on ``results['img']`` and **must run before Normalize**
-(it expects an HxWx3 uint8 image).  Bounding boxes are image-level invariant
-and are left untouched.
+Two transforms share one size-safe corruption backend:
 
-Two backends:
+* :class:`MultiCorruptionAugment` -- picks the corruption by ``results['aug_id']``
+  (used by the structured B x K loader / CADR).
+* :class:`RandomCorruptionAugment` -- with probability ``prob`` applies a random
+  corruption (random severity); otherwise leaves the image clean. Used for the
+  "corruption-augmented" baseline (Baseline B), and as a plain single-image aug.
 
-* ``builtin`` (default): size-agnostic numpy re-implementation
-  (:mod:`corruptions_builtin`). Works on 1024x1024 FAIR1M tiles.
-* ``imagecorruptions``: the upstream Hendrycks package. NOTE: its ``fog`` /
-  ``frost`` use a fixed 256x256 plasma map and break on images larger than
-  256px.  Use only if your tiles are <=256 or you have patched the package.
+Both run **before Normalize** (expect HxWx3 uint8) and leave bboxes untouched.
 
-IMPORTANT: the corruptions used here for *training* should match whatever
-generated your pre-generated *evaluation* corruption sets, so the train and
-test degradation distributions agree.
+Backends:
+* ``builtin`` (default): size-agnostic numpy/cv2 (works on 1024x1024 tiles).
+* ``imagecorruptions``: upstream package (its fog breaks above 256px).
 
-MVE pool (K=3): ``aug_id`` 0 -> clean, 1 -> fog, 2 -> gaussian_noise, with the
-severity drawn at random from the configured range each call.
+IMPORTANT: training and evaluation must use the SAME corruption code/backend so
+the degradation distributions agree.
 """
 import numpy as np
 
@@ -35,74 +31,111 @@ except ImportError:  # pragma: no cover
     HAS_IMAGECORRUPTIONS = False
 
 
-# Default K=3 MVE pool. Each entry: corruption name (or None == clean) and the
-# severity (int, or list of ints to sample uniformly).
+def apply_corruption(img, corruption, severity, backend='builtin'):
+    """Apply one corruption to an HxWx3 uint8 image. ``corruption=None`` -> clean."""
+    if corruption is None:
+        return img
+    if isinstance(severity, (list, tuple)):
+        severity = int(np.random.choice(severity))
+    severity = int(severity)
+    img_u8 = np.ascontiguousarray(img.astype(np.uint8))
+
+    if backend == 'builtin':
+        if corruption not in _BUILTIN:
+            raise KeyError(
+                f"builtin backend has no '{corruption}'. Available: "
+                f'{sorted(_BUILTIN)}.')
+        out = _BUILTIN[corruption](img_u8, severity)
+    elif backend == 'imagecorruptions':
+        if not HAS_IMAGECORRUPTIONS:
+            raise ImportError(
+                'backend="imagecorruptions" needs `pip install imagecorruptions`.')
+        out = _ic_corrupt(img_u8, corruption_name=corruption, severity=severity)
+    else:
+        raise ValueError(f'unknown backend {backend}')
+    return out.astype(img.dtype)
+
+
+# Default K=3 MVE pool (clean / fog / gaussian_noise).
 DEFAULT_AUG_POOL = [
-    dict(corruption=None, severity=None),                 # 0: clean
-    dict(corruption='fog', severity=[1, 2]),              # 1: fog
-    dict(corruption='gaussian_noise', severity=[1, 2]),   # 2: gaussian noise
+    dict(corruption=None, severity=None),
+    dict(corruption='fog', severity=[1, 2]),
+    dict(corruption='gaussian_noise', severity=[1, 2]),
 ]
 
 
 @ROTATED_PIPELINES.register_module()
 class MultiCorruptionAugment(object):
-    """Apply a corruption selected by ``results['aug_id']``.
+    """Apply the corruption selected by ``results['aug_id']`` (structured loader).
 
     Args:
-        aug_pool (list[dict], optional): One entry per ``aug_id``, each with
-            ``corruption`` (str or None) and ``severity`` (int / list / None).
-            Defaults to the K=3 MVE pool (clean / fog / gaussian_noise).
+        aug_pool (list[dict], optional): one entry per ``aug_id`` with
+            ``corruption`` (str/None) and ``severity`` (int/list/None).
         backend (str): ``'builtin'`` (default) or ``'imagecorruptions'``.
-        skip_if_no_aug_id (bool): pass the image through unchanged when
-            ``aug_id`` is absent (e.g. plain val/test). Default: True.
+        skip_if_no_aug_id (bool): pass through when ``aug_id`` is absent.
     """
 
-    def __init__(self,
-                 aug_pool=None,
-                 backend='builtin',
-                 skip_if_no_aug_id=True):
+    def __init__(self, aug_pool=None, backend='builtin', skip_if_no_aug_id=True):
         assert backend in ('builtin', 'imagecorruptions')
         self.aug_pool = aug_pool if aug_pool is not None else DEFAULT_AUG_POOL
         self.backend = backend
         self.skip_if_no_aug_id = skip_if_no_aug_id
-
-    def _apply(self, img, corruption, severity):
-        if corruption is None:
-            return img
-        if isinstance(severity, (list, tuple)):
-            severity = int(np.random.choice(severity))
-        severity = int(severity)
-        img_u8 = np.ascontiguousarray(img.astype(np.uint8))
-
-        if self.backend == 'builtin':
-            if corruption not in _BUILTIN:
-                raise KeyError(
-                    f"builtin backend has no '{corruption}'. Available: "
-                    f'{sorted(_BUILTIN)}. Use backend="imagecorruptions" or '
-                    'add it to corruptions_builtin.py.')
-            out = _BUILTIN[corruption](img_u8, severity)
-        else:
-            if not HAS_IMAGECORRUPTIONS:
-                raise ImportError(
-                    'backend="imagecorruptions" needs the `imagecorruptions` '
-                    'package (`pip install imagecorruptions`).')
-            out = _ic_corrupt(
-                img_u8, corruption_name=corruption, severity=severity)
-        return out.astype(img.dtype)
 
     def __call__(self, results):
         aug_id = results.get('aug_id', None)
         if aug_id is None:
             if self.skip_if_no_aug_id:
                 return results
-            raise KeyError(
-                "MultiCorruptionAugment expected 'aug_id' in results.")
+            raise KeyError("MultiCorruptionAugment expected 'aug_id'.")
         spec = self.aug_pool[int(aug_id)]
-        results['img'] = self._apply(results['img'], spec['corruption'],
-                                     spec['severity'])
+        results['img'] = apply_corruption(
+            results['img'], spec['corruption'], spec['severity'], self.backend)
         results['corruption_name'] = spec['corruption']
         return results
 
     def __repr__(self):
         return (f'{self.__class__.__name__}(backend={self.backend}, '
                 f'aug_pool={self.aug_pool})')
+
+
+@ROTATED_PIPELINES.register_module()
+class RandomCorruptionAugment(object):
+    """With prob ``prob`` apply a random corruption (random severity); else clean.
+
+    Used for the corruption-augmented baseline (Baseline B). Match the
+    ``corruptions`` / ``severities`` / ``prob`` to the structured-loader pool so
+    the comparison isolates the method, not the augmentation.
+
+    Args:
+        corruptions (list[str]): corruption pool to sample from.
+        severities (list[int]): severity pool to sample from.
+        prob (float): probability of applying a corruption (else clean).
+        backend (str): ``'builtin'`` or ``'imagecorruptions'``.
+    """
+
+    def __init__(self,
+                 corruptions=('gaussian_noise', 'defocus_blur', 'brightness',
+                              'fog', 'spatter'),
+                 severities=(1, 2, 3),
+                 prob=0.5,
+                 backend='builtin'):
+        assert backend in ('builtin', 'imagecorruptions')
+        self.corruptions = list(corruptions)
+        self.severities = list(severities)
+        self.prob = prob
+        self.backend = backend
+
+    def __call__(self, results):
+        if np.random.rand() < self.prob:
+            name = str(np.random.choice(self.corruptions))
+            sev = int(np.random.choice(self.severities))
+            results['img'] = apply_corruption(
+                results['img'], name, sev, self.backend)
+            results['corruption_name'] = name
+        else:
+            results['corruption_name'] = None
+        return results
+
+    def __repr__(self):
+        return (f'{self.__class__.__name__}(prob={self.prob}, '
+                f'corruptions={self.corruptions}, severities={self.severities})')
