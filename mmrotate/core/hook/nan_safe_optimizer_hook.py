@@ -44,34 +44,27 @@ class NaNSafeOptimizerHook(OptimizerHook):
         runner.optimizer.zero_grad()
         loss = runner.outputs['loss']
 
+        # Always call backward so the DDP gradient reduction completes every
+        # iteration (skipping backward under DDP triggers "Expected to have
+        # finished reduction in the prior iteration"). If the loss is
+        # non-finite we simply drop the grads and skip optimizer.step(), so the
+        # weights are never corrupted.
+        loss.backward()
+
         finite = _all_ranks_finite(bool(torch.isfinite(loss).item()),
                                    loss.device)
         if not finite:
             self._skipped += 1
             runner.logger.warning(
-                'NaNSafeOptimizerHook: non-finite loss on some rank, skipping '
-                f'iter (total skipped: {self._skipped}).')
+                'NaNSafeOptimizerHook: non-finite loss on some rank, dropping '
+                f'grads & skipping step (total skipped: {self._skipped}).')
             runner.optimizer.zero_grad()
             return
-
-        loss.backward()
 
         if self.grad_clip is not None:
             grad_norm = self.clip_grads(runner.model.parameters())
             if grad_norm is not None:
                 runner.log_buffer.update({'grad_norm': float(grad_norm)},
                                          runner.outputs['num_samples'])
-
-        if self.check_grad:
-            local_finite = all(
-                p.grad is None or torch.isfinite(p.grad).all()
-                for p in runner.model.parameters())
-            if not _all_ranks_finite(local_finite, loss.device):
-                self._skipped += 1
-                runner.logger.warning(
-                    'NaNSafeOptimizerHook: non-finite grad on some rank, '
-                    f'skipping step (total skipped: {self._skipped}).')
-                runner.optimizer.zero_grad()
-                return
 
         runner.optimizer.step()

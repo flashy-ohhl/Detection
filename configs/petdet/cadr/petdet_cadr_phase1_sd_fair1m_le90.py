@@ -99,4 +99,8 @@ optimizer_config = dict(
     type='NaNSafeOptimizerHook',
     grad_clip=dict(max_norm=35, norm_type=2))
 
+# The nuisance branch / contrastive losses are only conditionally in the graph
+# (e.g. when a batch has too few positives), so let DDP tolerate that.
+find_unused_parameters = True
+
 # 12 epochs / step [8,11] / lr 0.02 inherited (matches Baseline A/B).

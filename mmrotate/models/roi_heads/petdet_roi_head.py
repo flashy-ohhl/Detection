@@ -177,7 +177,9 @@ class PETDetRoIHead(OrientedStandardRoIHead):
         labels = bbox_targets[0]
         gathered = self._gather_positives(labels, sampling_results, img_metas)
         if gathered is None or gathered[0].numel() < 2:
-            z = disc.sum() * 0.0
+            # touch both disc AND nuis so neither MLP is an "unused parameter"
+            # under DDP when the contrastive cannot be computed this iter.
+            z = disc.sum() * 0.0 + nuis.sum() * 0.0
             losses = dict(loss_disc_bicon=z, loss_nuis_bicon=z)
             if self.adv_enable:
                 losses.update(loss_adv_disc=z, loss_adv_nuis=z)
@@ -226,7 +228,7 @@ class PETDetRoIHead(OrientedStandardRoIHead):
             aug_ids.append(img_metas[i]['aug_id'])
 
         if len(disc_vecs) < 2:
-            z = disc.sum() * 0.0
+            z = disc.sum() * 0.0 + nuis.sum() * 0.0
             return dict(loss_disc_bicon=z, loss_nuis_bicon=z)
 
         disc_vecs = F.normalize(torch.stack(disc_vecs), dim=1)
