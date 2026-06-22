@@ -72,18 +72,60 @@ DEFAULT_AUG_POOL = [
 class MultiCorruptionAugment(object):
     """Apply the corruption selected by ``results['aug_id']`` (structured loader).
 
+    Two modes:
+
+    * fixed ``aug_pool``: ``aug_id`` indexes a fixed list (clean / fog / ...).
+    * random pool: ``aug_id == 0`` is clean; ``aug_id >= 1`` draws a random
+      corruption from ``random_corruptions`` with a random severity from
+      ``random_severities`` (so the K-1 corrupted views of an image cover
+      diverse corruptions, matching the Baseline-B exposure). Set
+      ``random_corruptions`` to enable.
+
+    Always tags ``results`` with ``corruption_name``, ``corruption_id`` (0=clean,
+    else 1-based index into the pool) and ``severity`` (0 for clean), so the RoI
+    head can group the nuisance branch by corruption type.
+
     Args:
-        aug_pool (list[dict], optional): one entry per ``aug_id`` with
-            ``corruption`` (str/None) and ``severity`` (int/list/None).
-        backend (str): ``'builtin'`` (default) or ``'imagecorruptions'``.
+        aug_pool (list[dict], optional): fixed mode, one entry per ``aug_id``.
+        random_corruptions (list[str], optional): random-pool mode.
+        random_severities (list[int]): severities to sample in random mode.
+        backend (str): ``'builtin'`` or ``'imagecorruptions'``.
         skip_if_no_aug_id (bool): pass through when ``aug_id`` is absent.
     """
 
-    def __init__(self, aug_pool=None, backend='builtin', skip_if_no_aug_id=True):
+    def __init__(self,
+                 aug_pool=None,
+                 random_corruptions=None,
+                 random_severities=(1, 2, 3),
+                 backend='builtin',
+                 skip_if_no_aug_id=True):
         assert backend in ('builtin', 'imagecorruptions')
-        self.aug_pool = aug_pool if aug_pool is not None else DEFAULT_AUG_POOL
+        self.random_corruptions = (
+            list(random_corruptions) if random_corruptions else None)
+        self.random_severities = list(random_severities)
+        # corruption -> id (1-based); clean is 0
+        if self.random_corruptions is not None:
+            self._cid = {c: i + 1 for i, c in enumerate(self.random_corruptions)}
+            self.aug_pool = None
+        else:
+            self.aug_pool = aug_pool if aug_pool is not None else DEFAULT_AUG_POOL
+            self._cid = {
+                e['corruption']: i
+                for i, e in enumerate(self.aug_pool)
+            }
         self.backend = backend
         self.skip_if_no_aug_id = skip_if_no_aug_id
+
+    def _pick(self, aug_id):
+        """Return (corruption_name, severity) for this aug_id."""
+        if self.random_corruptions is not None:
+            if aug_id == 0:
+                return None, None
+            name = str(np.random.choice(self.random_corruptions))
+            sev = int(np.random.choice(self.random_severities))
+            return name, sev
+        spec = self.aug_pool[int(aug_id)]
+        return spec['corruption'], spec['severity']
 
     def __call__(self, results):
         aug_id = results.get('aug_id', None)
@@ -91,15 +133,19 @@ class MultiCorruptionAugment(object):
             if self.skip_if_no_aug_id:
                 return results
             raise KeyError("MultiCorruptionAugment expected 'aug_id'.")
-        spec = self.aug_pool[int(aug_id)]
+        name, sev = self._pick(int(aug_id))
         results['img'] = apply_corruption(
-            results['img'], spec['corruption'], spec['severity'], self.backend)
-        results['corruption_name'] = spec['corruption']
+            results['img'], name, sev, self.backend)
+        results['corruption_name'] = name
+        results['corruption_id'] = 0 if name is None else self._cid.get(name, 0)
+        if isinstance(sev, (list, tuple)):
+            sev = -1  # unresolved range (fixed mode); not used for nuis/sev
+        results['severity'] = 0 if name is None else int(sev)
         return results
 
     def __repr__(self):
         return (f'{self.__class__.__name__}(backend={self.backend}, '
-                f'aug_pool={self.aug_pool})')
+                f'random={self.random_corruptions})')
 
 
 @ROTATED_PIPELINES.register_module()

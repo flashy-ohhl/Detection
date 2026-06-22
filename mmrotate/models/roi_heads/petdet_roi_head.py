@@ -147,7 +147,10 @@ class PETDetRoIHead(OrientedStandardRoIHead):
             if n_pos > 0:
                 gt_inds = res.pos_assigned_gt_inds[:n_pos]
                 oid = int(img_metas[i]['original_id'])
-                aid = int(img_metas[i]['aug_id'])
+                # nuisance groups by corruption *type* (id); fall back to the
+                # aug slot if the transform did not tag a corruption_id.
+                aid = int(img_metas[i].get('corruption_id',
+                                           img_metas[i].get('aug_id', 0)))
                 global_pos = pos_in_block + start
                 if self.max_pos_per_img and n_pos > self.max_pos_per_img:
                     perm = torch.randperm(
