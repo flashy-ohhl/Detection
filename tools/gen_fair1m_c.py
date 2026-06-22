@@ -47,7 +47,9 @@ def parse_args():
         nargs='+',
         default=['gaussian_noise', 'defocus_blur', 'brightness', 'fog',
                  'spatter'])
-    p.add_argument('--severities', nargs='+', type=int, default=[1, 2, 3])
+    # train uses {1,2,3}; s5 is an unseen "severe" tier for cross-severity
+    # generalization. Naming matches the existing _C dirs: {corruption}_s{N}.
+    p.add_argument('--severities', nargs='+', type=int, default=[1, 2, 3, 5])
     p.add_argument('--backend', default='builtin')
     p.add_argument('--ext', default='.png', help='image extension')
     p.add_argument('--seed', type=int, default=0, help='reproducibility seed')
@@ -82,7 +84,7 @@ def main():
 
     for corruption in args.corruptions:
         for sev in args.severities:
-            variant = f'{corruption}_{sev}'
+            variant = f'{corruption}_s{sev}'
             out_dir = osp.join(args.dst, variant, 'images')
             mmcv.mkdir_or_exist(out_dir)
 
@@ -99,7 +101,7 @@ def main():
     print(f'    --corruption-root {args.dst} \\')
     print(f'    --ann-file <shared annfiles> \\')
     print('    --variants clean ' +
-          ' '.join(f'{c}_{s}' for c in args.corruptions
+          ' '.join(f'{c}_s{s}' for c in args.corruptions
                    for s in args.severities))
 
 
