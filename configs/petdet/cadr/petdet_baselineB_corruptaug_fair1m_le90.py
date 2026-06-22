@@ -33,12 +33,14 @@ train_pipeline = [
         direction=['horizontal', 'vertical', 'diagonal'],
         version=angle_version),
     # 50% clean / 50% random corruption, before Normalize.
+    # backend='imagecorruptions' to match the FAIR1M-C benchmark (standard
+    # library). Train severities {1,2,3}; eval also covers s5 (unseen severe).
     dict(
         type='RandomCorruptionAugment',
         corruptions=corruption_pool,
         severities=[1, 2, 3],
         prob=0.5,
-        backend='builtin'),
+        backend='imagecorruptions'),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size_divisor=32),
     dict(type='DefaultFormatBundle'),

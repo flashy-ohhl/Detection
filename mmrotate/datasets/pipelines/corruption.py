@@ -50,7 +50,11 @@ def apply_corruption(img, corruption, severity, backend='builtin'):
         if not HAS_IMAGECORRUPTIONS:
             raise ImportError(
                 'backend="imagecorruptions" needs `pip install imagecorruptions`.')
-        out = _ic_corrupt(img_u8, corruption_name=corruption, severity=severity)
+        # mmdet loads BGR; imagecorruptions (and the FAIR1M-C generator) expect
+        # RGB. Convert in/out so training matches the benchmark exactly.
+        rgb = np.ascontiguousarray(img_u8[..., ::-1])
+        out = _ic_corrupt(rgb, corruption_name=corruption, severity=severity)
+        out = np.ascontiguousarray(out[..., ::-1])
     else:
         raise ValueError(f'unknown backend {backend}')
     return out.astype(img.dtype)
