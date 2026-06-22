@@ -54,6 +54,11 @@ class StructuredBatchSampler(Sampler):
         self.rank = rank if rank is not None else 0
         assert 0 <= self.rank < self.num_replicas
 
+        # mmcv's DistSamplerSeedHook accesses ``data_loader.batch_sampler.sampler
+        # .set_epoch(...)``. This object *is* the batch_sampler, so expose a
+        # self-reference carrying set_epoch to satisfy that hook.
+        self.sampler = self
+
         # number of base images handled by each rank
         self.base_per_rank = int(
             math.ceil(self.num_base / self.num_replicas))
