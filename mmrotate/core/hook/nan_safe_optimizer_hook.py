@@ -35,9 +35,13 @@ class NaNSafeOptimizerHook(OptimizerHook):
             Default: False (the scalar-loss check is usually enough & cheaper).
     """
 
-    def __init__(self, grad_clip=None, check_grad=False):
+    def __init__(self, grad_clip=None, check_grad=False, max_loss=None):
         super(NaNSafeOptimizerHook, self).__init__(grad_clip=grad_clip)
         self.check_grad = check_grad
+        # also skip when the (finite) loss exceeds this -- catches the
+        # "finite but exploding" divergence (e.g. rotated-reg blow-up) BEFORE
+        # it becomes inf and corrupts the weights.
+        self.max_loss = max_loss
         self._skipped = 0
 
     def after_train_iter(self, runner):
@@ -51,13 +55,14 @@ class NaNSafeOptimizerHook(OptimizerHook):
         # weights are never corrupted.
         loss.backward()
 
-        finite = _all_ranks_finite(bool(torch.isfinite(loss).item()),
-                                   loss.device)
-        if not finite:
+        local_ok = bool(torch.isfinite(loss).item())
+        if self.max_loss is not None and float(loss.item()) > self.max_loss:
+            local_ok = False
+        if not _all_ranks_finite(local_ok, loss.device):
             self._skipped += 1
             runner.logger.warning(
-                'NaNSafeOptimizerHook: non-finite loss on some rank, dropping '
-                f'grads & skipping step (total skipped: {self._skipped}).')
+                'NaNSafeOptimizerHook: non-finite/too-large loss on some rank, '
+                f'dropping grads & skipping step (total skipped: {self._skipped}).')
             runner.optimizer.zero_grad()
             return
 

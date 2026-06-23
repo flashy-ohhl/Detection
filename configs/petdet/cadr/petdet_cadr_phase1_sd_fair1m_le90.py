@@ -94,10 +94,11 @@ data = dict(
     val=dict(version=angle_version),
     test=dict(version=angle_version))
 
-# NaN-safe optimizer (corruption can trigger a forward-pass NaN).
+# NaN-safe optimizer: skip non-finite OR exploding (>max_loss) iterations.
 optimizer_config = dict(
     type='NaNSafeOptimizerHook',
-    grad_clip=dict(max_norm=35, norm_type=2))
+    grad_clip=dict(max_norm=35, norm_type=2),
+    max_loss=1000.0)
 
 # The nuisance branch / contrastive losses are only conditionally in the graph
 # (e.g. when a batch has too few positives), so let DDP tolerate that.
