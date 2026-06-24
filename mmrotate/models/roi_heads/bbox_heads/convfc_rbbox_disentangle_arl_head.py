@@ -35,6 +35,7 @@ class RotatedShared2FCBBoxDisentangleARLHead(RotatedConvFCBBoxARLHead):
                      hidden_channels=512,
                      disc_channels=128,
                      nuis_channels=128),
+                 cls_from='disc',
                  fc_out_channels=1024,
                  *args,
                  **kwargs):
@@ -52,17 +53,24 @@ class RotatedShared2FCBBoxDisentangleARLHead(RotatedConvFCBBoxARLHead):
         assert self.num_cls_fcs == 0 and self.num_reg_fcs == 0
         assert self.num_cls_convs == 0 and self.num_reg_convs == 0
 
+        assert cls_from in ('disc', 'feat')
+        self.cls_from = cls_from
+
         self.disentangle = DisentangleHead(
             in_channels=self.shared_out_channels, **disentangle)
-        # map F_disc back to the classifier input dimension
-        self.cls_proj = nn.Linear(self.disentangle.disc_channels,
-                                  self.cls_last_dim)
+        # cls_from='disc': classify through F_disc (cls_proj maps it back up).
+        # cls_from='feat': classify directly from F_feat (baseline path); the
+        #   disentangle/contrastive then acts only as a backbone regularizer.
+        if self.cls_from == 'disc':
+            self.cls_proj = nn.Linear(self.disentangle.disc_channels,
+                                      self.cls_last_dim)
         self._init_disentangle_weights()
 
     def _init_disentangle_weights(self):
         self.disentangle.init_weights()
-        nn.init.xavier_uniform_(self.cls_proj.weight)
-        nn.init.constant_(self.cls_proj.bias, 0)
+        if self.cls_from == 'disc':
+            nn.init.xavier_uniform_(self.cls_proj.weight)
+            nn.init.constant_(self.cls_proj.bias, 0)
 
     def forward(self, x):
         """Forward.
@@ -81,8 +89,15 @@ class RotatedShared2FCBBoxDisentangleARLHead(RotatedConvFCBBoxARLHead):
 
         dis = self.disentangle(feat)
 
-        # classification: F_disc -> proj -> fc_cls
-        x_cls = self.relu(self.cls_proj(dis['disc_raw']))
+        # classification path
+        if self.cls_from == 'feat':
+            # B1: classify directly from F_feat (== baseline, no 128 bottleneck);
+            # disentangle/contrastive is still computed below as an auxiliary
+            # regularizer on the shared/backbone features.
+            x_cls = feat
+        else:
+            # classify through F_disc (F_disc -> proj -> fc_cls)
+            x_cls = self.relu(self.cls_proj(dis['disc_raw']))
         cls_score = self.fc_cls(x_cls) if self.with_cls else None
 
         # regression: F_feat -> fc_reg
